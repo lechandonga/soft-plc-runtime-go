@@ -1,0 +1,17 @@
+{
+  "cycle_interval_ms": 10,
+  "watchdog_ms": 8,
+  "instruction_budget": 10000,
+  "io_sample_timeout_ms": 5,
+  "safe_outputs": {
+    "Y0": false,
+    "Y1": false,
+    "Y2": false,
+    "Y3": false,
+    "Y4": false
+  },
+  "retain": ["T0", "C0", "D0"],
+  "state_file": "./runtime-state.bin",
+  "persist_every_cycle": false,
+  "allow_discard_state": false
+}

@@ -1,0 +1,39 @@
+# 输送线启停 + 运行计时 + 工件计数示例
+# 行格式：指令 操作数...   # 后为注释；空白行忽略
+
+VERSION 1
+
+TAG start = X0
+TAG stop  = X1
+TAG run   = Y0
+TAG work  = X2
+
+# 自保持：启动按钮置位运行，停止按钮复位
+LD   start
+SET  run
+LD   stop
+RST  run
+
+# 运行指示灯直接跟随运行状态
+LD   run
+OUT  Y1
+
+# 运行 3 秒（扫描周期 10ms 时累计 300 个周期）后 T0 完成，点亮 Y2
+LD   run
+TON  T0 K3000
+LD   T0
+OUT  Y2
+
+# 工件传感器上升沿计数，计满 10 个 C0 完成，点亮 Y3；X3 人工清零
+LD   work
+CTU  C0 K10
+LD   C0
+OUT  Y3
+LD   X3
+RST  C0
+
+# 运行状态经边沿点亮一次“刚启动”脉冲 Y4
+LDP  run
+OUT  Y4
+
+END
