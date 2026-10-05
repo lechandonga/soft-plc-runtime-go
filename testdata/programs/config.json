@@ -1,0 +1,7 @@
+{
+  "scan_period_ms": 10,
+  "watchdog_instructions": 10000,
+  "retain": ["M0.0", "MW0", "C0"],
+  "retain_file": "testdata/run/retain.bin",
+  "safe_outputs": {"Q0.0": 0, "Q0.1": 0, "Q0.2": 0, "Q0.3": 0}
+}

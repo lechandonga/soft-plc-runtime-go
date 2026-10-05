@@ -1,0 +1,28 @@
+// 示例控制程序：
+// I0.0 启动，I0.1 停止，Q0.0 自锁；Q0.0 持续 3 个周期后 T0.Q 置位 Q0.1
+// I0.2 上升沿计数，C0 到 3 置位 Q0.2；I0.3 复位计数器
+// I0.4 上升沿脉冲输出到 Q0.3；MW0 演示可保持字（冷启动时装载常量 1234）
+LD     I0.0
+OR     Q0.0
+ANI    I0.1
+OUT    Q0.0
+
+LD     Q0.0
+TON    T0 30
+LD     T0.Q
+OUT    Q0.1
+
+LD     I0.2
+CTU    C0 3 I0.2 I0.3
+LD     C0.Q
+OUT    Q0.2
+
+LD     I0.4
+EU
+OUT    Q0.3
+
+CMP    != MW0 0
+JMP    afterinit
+MOV    1234 MW0
+afterinit:
+END
