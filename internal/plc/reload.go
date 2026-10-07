@@ -39,6 +39,9 @@ func (r *Runtime) Reload(source string, cfg Config) ReloadResult {
 	if err := validateSafeOutputs(prog, cfg2.SafeOutputs); err != nil {
 		return ReloadResult{Applied: false, Reason: "ValidationRejected", Detail: err.Error()}
 	}
+	if err := validateDrill(prog, cfg2); err != nil {
+		return ReloadResult{Applied: false, Reason: "ValidationRejected", Detail: err.Error()}
+	}
 
 	var store *RetainStore
 	if cfg2.RetainFile != "" {
@@ -60,6 +63,8 @@ func (r *Runtime) Reload(source string, cfg Config) ReloadResult {
 	oldProg, oldCfg, oldLayout, oldData, oldCommitted, oldStore :=
 		r.prog, r.cfg, r.layout, r.data, r.committed, r.store
 	r.prog, r.cfg, r.layout, r.data, r.committed, r.store = prog, cfg2, layout, nd, nd.Clone(), store
+	// 换新配置代：演练重新装弹（若新配置关闭则恒不触发）。
+	r.drillFired = false
 
 	// 切换后立即确保输出整包一致：先按新映像下发一次，外部不会看到混合状态。
 	if err := r.io.Write(r.data.Out); err != nil {

@@ -45,11 +45,16 @@ func (o Operand) Name() string {
 	return o.Raw
 }
 
-// Writable 报告该操作数能否作为赋值目标。
+// Writable 报告该操作数是否落在“真正可写的存储对象”上：
+// 仅 Q/M 区（位或字）以及整个计数器元件 Cn（仅 RST 可整体复位）。
+// 输入区、立即数、定时器及其字段、计数器字段（运行时自维护状态量）均不可写。
 func (o Operand) Writable() bool {
 	switch o.Kind {
-	case OpOutput, OpMemory, OpTimer, OpCounter:
+	case OpOutput, OpMemory:
 		return true
+	case OpCounter:
+		// 仅“整个 Cn”可作为 RST 的目标；Cn.Q/CV/PV 是只读字段。
+		return o.Field == "" && o.Type == TypeNone
 	default:
 		return false
 	}

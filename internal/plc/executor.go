@@ -1,6 +1,9 @@
 package plc
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // ExecError 是程序执行阶段的确定性异常（如除零、地址越界）。
 type ExecError struct {
@@ -17,6 +20,44 @@ type ExecConfig struct {
 	// MaxInstructions 为单个扫描周期允许执行的指令条数（含 JMP 后重复执行）。
 	// 0 表示使用默认值。
 	MaxInstructions int
+
+	// DeadlineMS 为墙钟上限（毫秒）；<=0 表示关闭。截止检查只发生在指令边界，
+	// 与条数预算相互独立。同一条指令边界上先判墙钟、再判条数：谁先触发算谁。
+	DeadlineMS int64
+
+	// start / now 为墙钟来源；测试可注入确定性虚拟时钟。
+	// now 为 nil 时使用 time.Now。
+	start time.Time
+	now   func() time.Time
+
+	// InjectFaultAfterInstr >= 0 时开启执行故障演练：
+	// 在该周期恰好执行完这么多条指令之后（0 表示第一条指令执行前），
+	// 确定性地抛出 *DrilledExecError，本周期后续指令不再执行。
+	InjectFaultAfterInstr int
+	injectFault           bool
+}
+
+// DeadlineExceededError 表示单周期墙钟预算耗尽（与指令条数预算区分开）。
+type DeadlineExceededError struct {
+	LineNo    int
+	LimitMS   int64
+	ElapsedMS int64
+}
+
+func (e *DeadlineExceededError) Error() string {
+	return fmt.Sprintf("看门狗超时：单周期墙钟耗时 %dms 超过上限 %dms（停在第%d行）",
+		e.ElapsedMS, e.LimitMS, e.LineNo)
+}
+
+// DrilledExecError 是演练开关主动注入的确定性执行异常（仅本地演练使用）。
+type DrilledExecError struct {
+	ScanOrd int64
+	LineNo  int
+}
+
+func (e *DrilledExecError) Error() string {
+	return fmt.Sprintf("执行故障演练：第%d个扫描周期在第%d行指令处主动注入运行期异常",
+		e.ScanOrd, e.LineNo)
 }
 
 // Execute 在给定数据表上完整执行一次程序。
@@ -27,8 +68,33 @@ func Execute(p *Program, d *DataTable, tickMS int64, cfg ExecConfig) (err error)
 	if budget <= 0 {
 		budget = 1_000_000
 	}
+	now := cfg.now
+	if now == nil {
+		now = time.Now
+	}
+	deadlineOn := cfg.DeadlineMS > 0
+	var deadline time.Time
+	if deadlineOn {
+		if cfg.start.IsZero() {
+			cfg.start = now()
+		}
+		deadline = cfg.start.Add(time.Duration(cfg.DeadlineMS) * time.Millisecond)
+	}
 	used := 0
-	checkBudget := func(st *Statement) error {
+	// 在每条指令执行前的统一检查点：先墙钟后条数，先触发者决定故障原因；
+	// 演练注入（如配置为第 N 条之后）也在该边界兑现。
+	guard := func(st *Statement) error {
+		if cfg.injectFault && used == cfg.InjectFaultAfterInstr {
+			return &DrilledExecError{LineNo: st.LineNo}
+		}
+		if deadlineOn && !now().Before(deadline) {
+			elapsed := now().Sub(cfg.start) / time.Millisecond
+			return &DeadlineExceededError{
+				LineNo:    st.LineNo,
+				LimitMS:   cfg.DeadlineMS,
+				ElapsedMS: int64(elapsed),
+			}
+		}
 		used++
 		if used > budget {
 			return &WatchdogError{LineNo: st.LineNo, Limit: budget}
@@ -46,7 +112,7 @@ func Execute(p *Program, d *DataTable, tickMS int64, cfg ExecConfig) (err error)
 	d.CR = false
 	for pc < len(p.Statements) {
 		st := &p.Statements[pc]
-		if e := checkBudget(st); e != nil {
+		if e := guard(st); e != nil {
 			return e
 		}
 		next := pc + 1

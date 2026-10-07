@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 // FaultKind 区分故障来源，便于按原因处置。
@@ -61,6 +62,15 @@ type Runtime struct {
 	stopCh    chan struct{}
 	stopped   bool
 
+	// scanAttempts 是进入扫描流程的尝试序号（从 1 起，故障周期也计数），
+	// 供执行故障演练按“第 N 个周期”确定性命中；跨恢复/重载单调递增。
+	scanAttempts uint64
+	// drillFired 保证演练在整个配置代内只触发一次；Reload 换新配置后重新装弹。
+	drillFired bool
+
+	// now 返回墙钟；为 nil 时使用 time.Now。测试可注入确定性虚拟时钟。
+	now func() time.Time
+
 	// Trace 在每个扫描阶段成功结束后回调（测试与日志用），持锁调用。
 	Trace func(scan uint64, phase string)
 }
@@ -81,6 +91,9 @@ func NewRuntime(source string, cfg Config, ioModule IO) (*Runtime, error) {
 		return nil, err
 	}
 	if err := validateSafeOutputs(prog, cfg.SafeOutputs); err != nil {
+		return nil, err
+	}
+	if err := validateDrill(prog, cfg); err != nil {
 		return nil, err
 	}
 	r := &Runtime{
@@ -106,6 +119,20 @@ func NewRuntime(source string, cfg Config, ioModule IO) (*Runtime, error) {
 		}
 	}
 	return r, nil
+}
+
+// validateDrill 校验执行故障演练参数：关闭时无任何约束；
+// 开启时注入位置必须落在本周期确实能执行到的指令边界上，防止演练配置静默失效。
+func validateDrill(p *Program, cfg Config) error {
+	if cfg.ExecFaultScan == 0 {
+		return nil
+	}
+	if cfg.ExecFaultAfterInstr >= len(p.Statements) {
+		return loadErr("StructureError", 0,
+			"ExecFaultAfterInstr=%d 超出程序指令边界数 %d，演练异常将永远无法触发",
+			cfg.ExecFaultAfterInstr, len(p.Statements))
+	}
+	return nil
 }
 
 func validateSafeOutputs(p *Program, safe map[string]int64) error {

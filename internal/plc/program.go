@@ -229,19 +229,32 @@ func bindStatement(p *Program, st *Statement) error {
 		if err != nil {
 			return err
 		}
-		if !a.Writable() {
-			return loadErr("IllegalAddress", line, "指令 %s 的目标 %q 不可写", st.Op, a.Raw)
+		if err := rejectIllegalWriteTarget(st.Op, "位", a); err != nil {
+			return err
 		}
 	case InsRST:
 		if err := parseOps(0); err != nil {
 			return err
 		}
 		a := st.Args[0]
-		if a.Kind == OpImmediate || a.Kind == OpInput {
-			return loadErr("IllegalAddress", line, "RST 目标 %q 必须是可写的位/字地址", a.Raw)
-		}
-		if a.Type != TypeBit && a.Type != TypeWord {
-			return loadErr("TypeError", line, "RST 目标 %q 类型非法", a.Raw)
+		// RST 目标必须是真正可写的存储对象：Q/M 位、Q/M 字，或整个计数器 Cn。
+		switch {
+		case a.Kind == OpCounter:
+			if a.Field != "" || a.Type != TypeNone {
+				return loadErr("IllegalTarget", line,
+					"RST 目标 %q 非法：计数器字段（Q/CV/PV）由运行时维护，只能整体复位 Cn", a.Raw)
+			}
+		case a.Kind == OpOutput || a.Kind == OpMemory:
+			if a.Type != TypeBit && a.Type != TypeWord {
+				return loadErr("TypeError", line, "RST 目标 %q 类型非法", a.Raw)
+			}
+		case a.Kind == OpTimer:
+			return loadErr("IllegalTarget", line,
+				"RST 目标 %q 非法：定时器由运行时维护，不是可写存储对象", a.Raw)
+		case a.Kind == OpInput:
+			return loadErr("IllegalAddress", line, "RST 目标 %q 非法：输入区只读", a.Raw)
+		default:
+			return loadErr("IllegalAddress", line, "RST 目标 %q 必须是可写的位/字地址或 Cn", a.Raw)
 		}
 	case InsMOV:
 		if err := parseOps(0, 1); err != nil {
@@ -254,8 +267,8 @@ func bindStatement(p *Program, st *Statement) error {
 		if err != nil {
 			return err
 		}
-		if !dst.Writable() {
-			return loadErr("IllegalAddress", line, "MOV 目标 %q 不可写", dst.Raw)
+		if err := rejectIllegalWriteTarget(st.Op, "字", dst); err != nil {
+			return err
 		}
 	case InsCMP:
 		relop := st.Tokens[0]
@@ -342,6 +355,34 @@ func bindStatement(p *Program, st *Statement) error {
 		}
 	}
 	return nil
+}
+
+// rejectIllegalWriteTarget 在加载阶段拒绝“目标不合法”的写入指令。
+// 分类口径：
+//   - 只读区（输入 I）、立即数：IllegalAddress（沿用既有“只读不可写”口径）；
+//   - 运行时自维护的状态量（定时器 Tn 及其字段、计数器字段 Q/CV/PV）：IllegalTarget；
+//   - 对象种类对不上（如把整个 Cn/Tn 当位或字写）：IllegalTarget。
+//
+// 能走到这里的 a 已通过“位/字”类型检查（TypeBit/TypeWord），
+// 因此 Tn/Cn 若出现必为带字段访问（T0.Q、C0.CV 等）。
+func rejectIllegalWriteTarget(op Instruction, wantKind string, a Operand) error {
+	switch a.Kind {
+	case OpOutput, OpMemory:
+		return nil
+	case OpInput:
+		return loadErr("IllegalAddress", 0, "指令 %s 的目标 %q 非法：输入区只读，不能作为写入目标", op, a.Raw)
+	case OpImmediate:
+		return loadErr("IllegalAddress", 0, "指令 %s 的目标 %q 非法：立即数不是可写存储对象", op, a.Raw)
+	case OpTimer:
+		return loadErr("IllegalTarget", 0,
+			"指令 %s 的目标 %q 非法：定时器及其字段（Q/ET/PT）由运行时维护，不能作为写入目标", op, a.Raw)
+	case OpCounter:
+		return loadErr("IllegalTarget", 0,
+			"指令 %s 的目标 %q 非法：计数器字段（Q/CV/PV）由运行时维护；计数位与字写入都不允许，"+
+				"计数器只能通过 RST Cn 整体复位", op, a.Raw)
+	default:
+		return loadErr("IllegalTarget", 0, "指令 %s 的目标 %q 不是可写的%s存储对象", op, a.Raw, wantKind)
+	}
 }
 
 func (p *Program) validateReferences() error {

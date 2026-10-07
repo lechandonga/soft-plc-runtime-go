@@ -24,37 +24,85 @@ func (r *Runtime) Scan() error {
 	// 周期前完整快照：任何阶段失败都整体回滚，杜绝“半生效”。
 	preCycle := r.data.Clone()
 
+	// 墙钟保护从此刻起算：输入采样前开始，覆盖采样+执行+输出提交全过程。
+	now := r.now
+	if now == nil {
+		now = time.Now
+	}
+	cycleStart := now()
+
+	// 墙钟截止检查（采样/提交之后各一道）；超时与条数预算互相独立。
+	checkDeadline := func(lineRef int) error {
+		if r.cfg.WatchdogTimeMS <= 0 {
+			return nil
+		}
+		elapsed := now().Sub(cycleStart)
+		if elapsed >= time.Duration(r.cfg.WatchdogTimeMS)*time.Millisecond {
+			return &DeadlineExceededError{
+				LineNo:    lineRef,
+				LimitMS:   r.cfg.WatchdogTimeMS,
+				ElapsedMS: int64(elapsed / time.Millisecond),
+			}
+		}
+		return nil
+	}
+
 	// 阶段1：输入采样（整包快照；程序整个周期只看到这一份）。
 	in, err := r.io.Read(r.prog.InputSize)
 	if err != nil {
 		return r.enterFault(preCycle, FaultIO, err.Error())
 	}
+	if err := checkDeadline(0); err != nil {
+		return r.enterFault(preCycle, FaultWatchdog, err.Error())
+	}
 	copy(r.data.In, in)
 	if r.Trace != nil {
-		r.Trace(r.scanCount+1, "sample")
+		r.Trace(r.scanAttempts+1, "sample")
 	}
 
+	r.scanAttempts++
+
 	// 阶段2：程序执行（工作副本上直接跑；失败整体回滚，工作状态不保留）。
-	if err := Execute(r.prog, r.data, r.cfg.ScanPeriodMS, ExecConfig{
+	execCfg := ExecConfig{
 		MaxInstructions: r.cfg.WatchdogInstructions,
-	}); err != nil {
+		DeadlineMS:      r.cfg.WatchdogTimeMS,
+		start:           cycleStart,
+		now:             now,
+	}
+	if r.cfg.drillActiveAt(int64(r.scanAttempts), r.drillFired) {
+		execCfg.injectFault = true
+		execCfg.InjectFaultAfterInstr = r.cfg.ExecFaultAfterInstr
+	}
+	if err := Execute(r.prog, r.data, r.cfg.ScanPeriodMS, execCfg); err != nil {
 		kind := FaultExecution
+		detail := err.Error()
+		var drilled *DrilledExecError
+		if errors.As(err, &drilled) {
+			drilled.ScanOrd = int64(r.scanAttempts)
+			r.drillFired = true
+			detail = drilled.Error()
+		}
 		var wd *WatchdogError
-		if errors.As(err, &wd) {
+		var dl *DeadlineExceededError
+		if errors.As(err, &wd) || errors.As(err, &dl) {
 			kind = FaultWatchdog
 		}
-		return r.enterFault(preCycle, kind, err.Error())
+		return r.enterFault(preCycle, kind, detail)
 	}
+	r.drillFired = r.drillFired || execCfg.injectFault
 	if r.Trace != nil {
-		r.Trace(r.scanCount+1, "execute")
+		r.Trace(r.scanAttempts, "execute")
 	}
 
 	// 阶段3：输出提交（整包写入，外部只看到完整新包）。
 	if err := r.io.Write(r.data.Out); err != nil {
 		return r.enterFault(preCycle, FaultIO, err.Error())
 	}
+	if err := checkDeadline(0); err != nil {
+		return r.enterFault(preCycle, FaultWatchdog, err.Error())
+	}
 	if r.Trace != nil {
-		r.Trace(r.scanCount+1, "commit")
+		r.Trace(r.scanAttempts, "commit")
 	}
 
 	// 阶段4：保持数据提交（先扫描后持久化；失败进入 RetainFault，
