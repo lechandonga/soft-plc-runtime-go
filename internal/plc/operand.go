@@ -55,6 +55,13 @@ func (o Operand) Writable() bool {
 	}
 }
 
+// IsRuntimeMaintained 报告该操作数是否落在“由运行时自己维护的状态量”上
+// （定时器/计数器元件及其字段）。这类对象只能由 TON/CTU/RST(整计数器) 等
+// 指令内部更新，不允许作为普通写入指令的目标。
+func (o Operand) IsRuntimeMaintained() bool {
+	return o.Kind == OpTimer || o.Kind == OpCounter
+}
+
 // ParseOperand 解析单个操作数词法单元，只做词法与范围校验。
 func ParseOperand(s string) (Operand, error) {
 	if s == "" {

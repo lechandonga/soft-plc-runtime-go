@@ -23,6 +23,8 @@ func (r *Runtime) Scan() error {
 
 	// 周期前完整快照：任何阶段失败都整体回滚，杜绝“半生效”。
 	preCycle := r.data.Clone()
+	// 单周期墙钟计时起点：从输入采样开始，到输出提交完成为止。
+	cycleStart := r.now()
 
 	// 阶段1：输入采样（整包快照；程序整个周期只看到这一份）。
 	in, err := r.io.Read(r.prog.InputSize)
@@ -35,9 +37,21 @@ func (r *Runtime) Scan() error {
 	}
 
 	// 阶段2：程序执行（工作副本上直接跑；失败整体回滚，工作状态不保留）。
-	if err := Execute(r.prog, r.data, r.cfg.ScanPeriodMS, ExecConfig{
+	execCfg := ExecConfig{
 		MaxInstructions: r.cfg.WatchdogInstructions,
-	}); err != nil {
+	}
+	// 本地故障演练：仅在配置开启且本周期号命中且尚未触发过时注入一次。
+	if fi := r.cfg.FaultInjection; fi != nil {
+		scanNo := int64(r.scanCount) + 1
+		for _, s := range fi.ExecErrorScans {
+			if s == scanNo && !r.injectedScans[scanNo] {
+				execCfg.FaultInjection = &ExecFaultInjection{AtInstruction: fi.AtInstruction}
+				r.injectedScans[scanNo] = true
+				break
+			}
+		}
+	}
+	if err := Execute(r.prog, r.data, r.cfg.ScanPeriodMS, execCfg); err != nil {
 		kind := FaultExecution
 		var wd *WatchdogError
 		if errors.As(err, &wd) {
@@ -55,6 +69,15 @@ func (r *Runtime) Scan() error {
 	}
 	if r.Trace != nil {
 		r.Trace(r.scanCount+1, "commit")
+	}
+
+	// 单周期墙钟上限：采样->执行->提交全程耗时超限即判 ScanTimeoutFault，
+	// 与指令条数预算（WatchdogFault）相互独立，整体回滚并落安全值。
+	if limit := r.cfg.ScanTimeLimitMS; limit > 0 {
+		if elapsed := r.now().Sub(cycleStart); elapsed > time.Duration(limit)*time.Millisecond {
+			return r.enterFault(preCycle, FaultScanTimeout,
+				fmt.Sprintf("单周期墙钟耗时 %v 超过上限 %dms", elapsed, limit))
+		}
 	}
 
 	// 阶段4：保持数据提交（先扫描后持久化；失败进入 RetainFault，

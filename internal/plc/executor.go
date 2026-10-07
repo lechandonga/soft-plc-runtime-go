@@ -12,11 +12,20 @@ func (e *ExecError) Error() string {
 	return fmt.Sprintf("执行异常 第%d行: %s", e.LineNo, e.Detail)
 }
 
+// ExecFaultInjection 描述一次确定性的运行期异常注入（仅本地故障演练）。
+type ExecFaultInjection struct {
+	// AtInstruction 是注入点的指令序号（0 起）：执行到该指令前返回异常。
+	AtInstruction int
+}
+
 // ExecConfig 控制执行器的看门狗预算（与墙钟解耦，保证可复现）。
 type ExecConfig struct {
 	// MaxInstructions 为单个扫描周期允许执行的指令条数（含 JMP 后重复执行）。
 	// 0 表示使用默认值。
 	MaxInstructions int
+	// FaultInjection 非 nil 时启用一次确定性异常注入；nil（零值）表示关闭，
+	// 关闭路径与引入该能力前的执行语义完全一致。
+	FaultInjection *ExecFaultInjection
 }
 
 // Execute 在给定数据表上完整执行一次程序。
@@ -48,6 +57,9 @@ func Execute(p *Program, d *DataTable, tickMS int64, cfg ExecConfig) (err error)
 		st := &p.Statements[pc]
 		if e := checkBudget(st); e != nil {
 			return e
+		}
+		if cfg.FaultInjection != nil && pc == cfg.FaultInjection.AtInstruction {
+			return &ExecError{LineNo: st.LineNo, Detail: "注入的运行期异常（本地故障演练）"}
 		}
 		next := pc + 1
 		switch st.Op {

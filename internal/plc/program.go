@@ -232,6 +232,10 @@ func bindStatement(p *Program, st *Statement) error {
 		if !a.Writable() {
 			return loadErr("IllegalAddress", line, "指令 %s 的目标 %q 不可写", st.Op, a.Raw)
 		}
+		if a.IsRuntimeMaintained() {
+			return loadErr("IllegalWriteTarget", line,
+				"指令 %s 的目标 %q 是运行时维护的状态量，不允许作为写入目标", st.Op, a.Raw)
+		}
 	case InsRST:
 		if err := parseOps(0); err != nil {
 			return err
@@ -240,7 +244,13 @@ func bindStatement(p *Program, st *Statement) error {
 		if a.Kind == OpImmediate || a.Kind == OpInput {
 			return loadErr("IllegalAddress", line, "RST 目标 %q 必须是可写的位/字地址", a.Raw)
 		}
-		if a.Type != TypeBit && a.Type != TypeWord {
+		// 仅允许整体计数器 Cn（复位 CV/Q）；定时器元件及 T/C 字段均为运行时维护量。
+		if a.Kind == OpTimer || (a.Kind == OpCounter && a.Field != "") {
+			return loadErr("IllegalWriteTarget", line,
+				"RST 目标 %q 是运行时维护的状态量，仅允许整体计数器 Cn", a.Raw)
+		}
+		// 整体计数器 Cn 无位/字类型，是合法的复位目标；其余必须有明确类型。
+		if a.Kind != OpCounter && a.Type != TypeBit && a.Type != TypeWord {
 			return loadErr("TypeError", line, "RST 目标 %q 类型非法", a.Raw)
 		}
 	case InsMOV:
@@ -256,6 +266,10 @@ func bindStatement(p *Program, st *Statement) error {
 		}
 		if !dst.Writable() {
 			return loadErr("IllegalAddress", line, "MOV 目标 %q 不可写", dst.Raw)
+		}
+		if dst.IsRuntimeMaintained() {
+			return loadErr("IllegalWriteTarget", line,
+				"MOV 目标 %q 是运行时维护的状态量，不允许作为写入目标", dst.Raw)
 		}
 	case InsCMP:
 		relop := st.Tokens[0]

@@ -5,18 +5,20 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 // FaultKind 区分故障来源，便于按原因处置。
 type FaultKind string
 
 const (
-	FaultNone      FaultKind = ""
-	FaultIO        FaultKind = "IOFault"        // I/O 失联（采样或提交）
-	FaultWatchdog  FaultKind = "WatchdogFault"  // 单周期超时
-	FaultExecution FaultKind = "ExecutionFault" // 程序执行异常
-	FaultRetain    FaultKind = "RetainFault"    // 保持数据提交失败
-	FaultStart     FaultKind = "StartupFault"   // 启动时保持数据不兼容
+	FaultNone        FaultKind = ""
+	FaultIO          FaultKind = "IOFault"          // I/O 失联（采样或提交）
+	FaultWatchdog    FaultKind = "WatchdogFault"    // 单周期指令条数超预算
+	FaultScanTimeout FaultKind = "ScanTimeoutFault" // 单周期墙钟耗时超上限
+	FaultExecution   FaultKind = "ExecutionFault"   // 程序执行异常
+	FaultRetain      FaultKind = "RetainFault"      // 保持数据提交失败
+	FaultStart       FaultKind = "StartupFault"     // 启动时保持数据不兼容
 )
 
 // Fault 记录当前故障状态与原因；不允许悄悄自动恢复。
@@ -61,6 +63,11 @@ type Runtime struct {
 	stopCh    chan struct{}
 	stopped   bool
 
+	// now 是墙钟来源（单周期耗时上限用）；默认为 time.Now，测试可替换为确定性时钟。
+	now func() time.Time
+	// injectedScans 记录已触发过的故障演练周期号，保证每个周期号至多注入一次。
+	injectedScans map[int64]bool
+
 	// Trace 在每个扫描阶段成功结束后回调（测试与日志用），持锁调用。
 	Trace func(scan uint64, phase string)
 }
@@ -83,11 +90,16 @@ func NewRuntime(source string, cfg Config, ioModule IO) (*Runtime, error) {
 	if err := validateSafeOutputs(prog, cfg.SafeOutputs); err != nil {
 		return nil, err
 	}
+	if err := validateFaultInjection(prog, cfg.FaultInjection); err != nil {
+		return nil, err
+	}
 	r := &Runtime{
 		prog: prog, cfg: cfg, layout: layout, io: ioModule,
-		data:      newDataTable(prog),
-		committed: newDataTable(prog),
-		stopCh:    make(chan struct{}),
+		data:          newDataTable(prog),
+		committed:     newDataTable(prog),
+		stopCh:        make(chan struct{}),
+		now:           time.Now,
+		injectedScans: map[int64]bool{},
 	}
 	if cfg.RetainFile != "" {
 		r.store = NewRetainStore(cfg.RetainFile)

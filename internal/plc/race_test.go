@@ -1,6 +1,7 @@
 package plc
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -108,5 +109,77 @@ BOGUS
 	out := rt.SnapshotOutputs()
 	if out[0]&0x03 == 0x03 {
 		t.Fatalf("观察到新旧程序同时驱动输出: %08b", out[0])
+	}
+}
+
+// TestConcurrentFaultInjectionReloadRecover 在 -race 下验证：
+// 故障演练开启时，扫描、热重载（含新演练配置）、显式恢复、保持提交并发叠加，
+// 无数据竞争；故障只以锁存语义出现，恢复后从最近完整提交继续。
+func TestConcurrentFaultInjectionReloadRecover(t *testing.T) {
+	dir := t.TempDir()
+	src := `
+LD I0.0
+OUT Q0.0
+MOV 1 MW0
+END
+`
+	mkCfg := func(scan int64) Config {
+		cfg := DefaultConfig()
+		cfg.Retain = []string{"MW0"}
+		cfg.RetainFile = filepath.Join(dir, "retain.bin")
+		cfg.FaultInjection = &FaultInjectionConfig{
+			ExecErrorScans: []int64{scan},
+			AtInstruction:  1,
+		}
+		return cfg
+	}
+	rt, io := newTestRuntime(t, src, mkCfg(5))
+	io.setBit(0, 0, true)
+	caseLog(t, "并发竞态-演练/重载/恢复/扫描叠加", "扫描300拍 + 并发重载(注入第5拍) + 并发恢复",
+		"-race 无数据竞争；出现的故障均为 ExecutionFault 锁存；最终无故障或故障可被显式清除")
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() { // 扫描者
+		defer wg.Done()
+		for i := 0; i < 300; i++ {
+			_ = rt.Scan()
+		}
+		close(stop)
+	}()
+	wg.Add(1)
+	go func() { // 重载者：合法配置（含演练）与非法配置交替
+		defer wg.Done()
+		for i := 0; i < 40; i++ {
+			rt.Reload(src, mkCfg(int64(3+i)))
+			rt.Reload("BOGUS\n", DefaultConfig())
+		}
+	}()
+	wg.Add(1)
+	go func() { // 恢复者：有故障就显式恢复
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = rt.Recover()
+			}
+		}
+	}()
+	wg.Wait()
+
+	// 收尾：若仍锁存故障，必须是 ExecutionFault 且可显式清除。
+	if f := rt.Fault(); f.Kind != FaultNone {
+		if f.Kind != FaultExecution {
+			t.Fatalf("演练叠加场景只应出现 ExecutionFault，got %s", f.Kind)
+		}
+		if err := rt.Recover(); err != nil {
+			t.Fatalf("锁存故障应可显式恢复: %v", err)
+		}
+	}
+	if err := rt.Scan(); err != nil {
+		t.Fatalf("最终扫描应可正常推进: %v", err)
 	}
 }

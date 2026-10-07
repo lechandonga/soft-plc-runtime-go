@@ -39,6 +39,9 @@ func (r *Runtime) Reload(source string, cfg Config) ReloadResult {
 	if err := validateSafeOutputs(prog, cfg2.SafeOutputs); err != nil {
 		return ReloadResult{Applied: false, Reason: "ValidationRejected", Detail: err.Error()}
 	}
+	if err := validateFaultInjection(prog, cfg2.FaultInjection); err != nil {
+		return ReloadResult{Applied: false, Reason: "ValidationRejected", Detail: err.Error()}
+	}
 
 	var store *RetainStore
 	if cfg2.RetainFile != "" {
